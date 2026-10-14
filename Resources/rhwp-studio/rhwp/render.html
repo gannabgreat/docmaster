@@ -1,0 +1,71 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;padding:0;background:#fff}.pg{display:block;overflow:hidden}.pg svg{display:block}</style>
+</head><body><div id="pages"></div>
+<script type="module">
+// Convertly 가 WKWebView 로 여는 rhwp 렌더링 페이지.
+// 문서 바이트는 앱의 URL scheme handler 가 convertly-rhwp://app/rhwp/doc 으로 준다.
+import init, { HwpDocument } from './rhwp.js';
+
+let ctx = null, lastFont = '';
+globalThis.measureTextWidth = (font, text) => {
+  if (!ctx) ctx = document.createElement('canvas').getContext('2d');
+  if (font !== lastFont) { ctx.font = font; lastFont = font; }
+  return ctx.measureText(text).width;
+};
+
+let ready = null;
+async function load() {
+  await init({ module_or_path: './rhwp_bg.wasm' });   // 앱이 assets/rhwp_bg-*.wasm 로 연결해 준다
+  const buf = new Uint8Array(await (await fetch('doc')).arrayBuffer());
+  return new HwpDocument(buf);
+}
+
+// 모든 쪽을 세로로 쌓아 그린다. 쪽마다 CSS px 크기를 돌려준다.
+window.convertlyRender = async () => {
+  const doc = await load();
+  const n = doc.pageCount();
+  const sizes = [];
+  let html = '';
+  for (let i = 0; i < n; i++) {
+    const info = JSON.parse(doc.getPageInfo(i));
+    sizes.push([info.width, info.height]);
+    html += `<div class="pg" style="width:${info.width}px;height:${info.height}px">${doc.renderPageSvg(i)}</div>`;
+  }
+  document.getElementById('pages').innerHTML = html;
+  doc.free();
+  // 창 없는 WKWebView 에선 requestAnimationFrame 이 안 와서 setTimeout 으로 한 번 양보한다.
+  await new Promise(r => setTimeout(r, 0));
+  return JSON.stringify(sizes);
+};
+
+// 본문 문단과 표·그림 컨트롤을 순서대로 HTML 로 뽑는다(docx 저장용).
+window.convertlyHTML = async () => {
+  const doc = await load();
+  const strip = h => h.replace(/^[\s\S]*<!--StartFragment-->/, '').replace(/<!--EndFragment-->[\s\S]*$/, '');
+  let body = '';
+  for (let s = 0; s < doc.getSectionCount(); s++) {
+    const n = doc.getParagraphCount(s);
+    for (let p = 0; p < n; p++) {
+      let ctrls = [];
+      try { ctrls = JSON.parse(doc.getControlTextPositions(s, p) || '[]'); } catch (e) {}
+      for (let ci = 0; ci < ctrls.length; ci++) {
+        try { body += strip(doc.exportControlHtml(s, p, '[]', ci)); } catch (e) {}
+      }
+      try { body += strip(doc.exportSelectionHtml(s, p, 0, p, doc.getParagraphLength(s, p))); } catch (e) {}
+    }
+  }
+  doc.free();
+  return '<html><head><meta charset="utf-8"></head><body>' + body + '</body></html>';
+};
+// 문서를 HWPX(zip) 로 내보내 base64 로 돌려준다(docx 저장용 — 표 너비·테두리·문단 모양을 그대로 옮기려고).
+window.convertlyHWPX = async () => {
+  const doc = await load();
+  const bytes = doc.exportHwpx();
+  doc.free();
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+window.convertlyReady = true;
+</script></body></html>
